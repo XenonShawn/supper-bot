@@ -1,3 +1,11 @@
+# README
+
+This project was created under the software engineering project module (CP2106) by the National University of Singapore 
+in AY21/22. However, as the bot sees further use even after the module has completed, its codebase will be  refactored 
+once the creator has found some time to do so. 
+
+The following text is the original README for the project created for the purposes of the module.
+
 # README: NUS Orbital 2022
 
 ## Team Name
