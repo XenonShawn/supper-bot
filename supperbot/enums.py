@@ -1,6 +1,16 @@
 from __future__ import annotations
 
-from enum import unique, Enum
+from enum import unique, Enum, IntEnum
+
+
+class Stage(IntEnum):
+    CREATED = 0
+    CLOSED = 1
+
+
+class PaidStatus(IntEnum):
+    NOT_PAID = 0
+    PAID = 1
 
 
 @unique
@@ -81,6 +91,28 @@ def join(*args: str) -> str:
 
 def parse_callback_data(callback_data: str) -> list[str]:
     return callback_data.split(":")
+
+
+def extract_jio_number(callback_data: str) -> int | None:
+    """
+    Extract out the order number, used in inline queries.
+
+    Unfortunately, the first version of the bot used "orderX" instead of "jioX", even
+    though "jioX" would make more sense. Changing it to "jioX" should not make any
+    difference though, and may be a point for change in the future.
+    """
+    if not callback_data.startswith("order"):
+        return None
+
+    jio_id = callback_data[5:]
+
+    try:
+        num = int(jio_id)
+        if num < 0:
+            raise ValueError
+        return num
+    except ValueError:
+        return None
 
 
 # Useful Regex Variables

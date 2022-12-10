@@ -1,33 +1,26 @@
-"""Coroutines and helper functions relating to creation and sharing of a supper jio"""
+"""Coroutines and helper functions relating to creation of a supper jio"""
+
 import logging
 
 from telegram import (
     Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler
-from telegram.helpers import create_deep_linked_url
 
-from sqlalchemy.exc import NoResultFound
-
-from supperbot.db import db
 from supperbot.enums import CallbackType, parse_callback_data
-from supperbot.commands.helper import (
-    format_jio_message,
-    main_message_keyboard_markup,
-    update_consolidated_orders,
-)
+from supperbot.models import SupperJio
 
 
 async def create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> CallbackType:
-    """Main command for creating a new jio."""
+    """
+    This coroutine is executed when a user decides to create a jio.
+    """
 
     # TODO: Check that the user does not have a supper jio currently being created
     if context.user_data.get("create", False):
@@ -42,7 +35,6 @@ async def create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Callback
         "The name of the restaurant should not exceed 32 characters."
     )
 
-    # TODO: Abstract out the following to a separate method call
     reply_markup = ReplyKeyboardMarkup(
         [["McDonalds", "Al Amaan"], ["↩ Cancel"]], resize_keyboard=True
     )
@@ -77,151 +69,37 @@ async def additional_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await update.effective_chat.send_message(
         f"You are creating a supper jio order for restaurant: <b>{restaurant}</b>\n\n"
-        "Please type any additional information (eg. Delivery fees, close off timing, etc)",
+        "Please type any additional information (eg. Delivery fees, close off timing, "
+        "etc)",
         reply_markup=ReplyKeyboardRemove(),
         parse_mode=ParseMode.HTML,
     )
     return CallbackType.FINISHED_CREATION
 
 
-async def finished_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def finished_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Presents the final jio text after finishing the initialisation process."""
 
     information = update.message.text
-    jio = db.create_jio(
+    jio = SupperJio.create(
         update.effective_user.id, context.user_data["restaurant"], information
     )
 
-    # TODO: The following part is repeated in `resend_main_message`. Maybe refactor?
-    message = format_jio_message(jio)
-    keyboard = main_message_keyboard_markup(jio, context.bot)
-
     msg = await update.effective_chat.send_message(
-        text=message, reply_markup=keyboard, parse_mode=ParseMode.HTML
+        text=jio.message, reply_markup=jio.keyboard_markup, parse_mode=ParseMode.HTML
     )
-    db.update_jio_message_id(jio.id, msg.chat_id, msg.message_id)
+    jio.update(chat_id=msg.chat_id, message_id=msg.message_id)
 
     context.user_data["create"] = False
 
     return ConversationHandler.END
 
 
-async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the inline queries from sharing jios."""
-
-    query = update.inline_query.query
-    logging.debug("Received an inline query: " + query)
-
-    if query == "" or not query.startswith("order"):
-        await update.inline_query.answer([])
-        return
-
-    # TODO: Abstract out this part
-    order_id_str = query[5:]
-
-    if order_id_str:
-        # An order id is provided
-
-        order_id = int(query[5:])
-
-        # Check if the order id is valid
-        try:
-            jio = db.get_jio(order_id)
-        except NoResultFound:
-            jio = None
-
-        if jio is None or jio.owner_id != update.effective_user.id:
-            await update.inline_query.answer([])
-            return
-
-        # User owns the supper jio
-        deep_link = create_deep_linked_url(context.bot.username, f"order{order_id}")
-
-        results = [
-            InlineQueryResultArticle(
-                id=f"order{jio.id}",
-                title=f"Order {jio.id}",
-                description=f"Jio for {jio.restaurant}",
-                input_message_content=InputTextMessageContent(
-                    format_jio_message(jio), parse_mode=ParseMode.HTML
-                ),
-                reply_markup=InlineKeyboardMarkup.from_button(
-                    InlineKeyboardButton(text="➕ Add Order", url=deep_link)
-                ),
-            )
-        ]
-
-        await update.inline_query.answer(results)
-        return
-
-    # An order id is not provided
-    jios = db.get_user_jios(update.effective_user.id)
-
-    results = [
-        InlineQueryResultArticle(
-            id=f"order{jio.id}",
-            title=f"Order {jio.id}",
-            description=f"Jio for {jio.restaurant}",
-            input_message_content=InputTextMessageContent(
-                format_jio_message(jio), parse_mode=ParseMode.HTML
-            ),
-            reply_markup=InlineKeyboardMarkup.from_button(
-                InlineKeyboardButton(
-                    text="➕ Add Order",
-                    url=create_deep_linked_url(context.bot.username, f"order{jio.id}"),
-                )
-            ),
-        )
-        for jio in jios
-    ]
-
-    await update.inline_query.answer(results)
-    return
-
-
-async def shared_jio(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Updates the database with the new message id after a jio has been shared to a group.
-    """
-
-    chosen_result = update.chosen_inline_result
-
-    # TODO: Abstract this part
-    jio_id = int(chosen_result.result_id[5:])
-    msg_id = chosen_result.inline_message_id
-
-    db.new_msg(jio_id, msg_id)
-
-
-async def resend_main_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-
-    query = update.callback_query
-    jio_id = int(parse_callback_data(query.data)[1])
-    jio = db.get_jio(jio_id)
-
-    # Try editing the previous main message
-    try:
-        await update.effective_message.edit_reply_markup(None)
-    except BadRequest as e:
-        logging.error(f"Unable to edit main message for jio {jio}: {e}")
-
-    message = format_jio_message(jio)
-    keyboard = main_message_keyboard_markup(jio, context.bot)
-
-    await query.answer()
-
-    msg = await update.effective_chat.send_message(
-        text=message, reply_markup=keyboard, parse_mode=ParseMode.HTML
-    )
-    db.update_jio_message_id(jio.id, msg.chat_id, msg.message_id)
-
-
 async def amend_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # TODO: Prevent amending description too often
     query = update.callback_query
     jio_id = int(parse_callback_data(query.data)[1])
-    jio = context.user_data["jio"] = db.get_jio(jio_id)
+    jio = context.user_data["jio"] = SupperJio.get_jio(jio_id)
 
     # Try removing the markup
     try:
@@ -254,51 +132,42 @@ async def amend_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def finish_amend_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
     information = update.message.text
-    jio = context.user_data["jio"]
-    del context.user_data["jio"]
+    jio: SupperJio = context.user_data.pop("jio")
+    jio.update(description=information)
 
-    db.edit_jio_description(jio, information)
-
-    # TODO: Copied from `resend_main_message`. Try and refactor
-    # Try editing the previous main message
     try:
+        # Remove the "cancel" button from the previous message
         await context.user_data["amend_msg"].edit_reply_markup(None)
-        del context.user_data["amend_msg"]
     except BadRequest as e:
         logging.error(f"Unable to edit amend message for jio {jio}: {e}")
+    finally:
+        del context.user_data["amend_msg"]
 
-    message = format_jio_message(jio)
-    keyboard = main_message_keyboard_markup(jio, context.bot)
-
+    # Update all messages related to the supper jio
     msg = await update.effective_chat.send_message(
-        text=message, reply_markup=keyboard, parse_mode=ParseMode.HTML
+        text=jio.message, reply_markup=jio.keyboard_markup, parse_mode=ParseMode.HTML
     )
-    db.update_jio_message_id(jio.id, msg.chat_id, msg.message_id)
-
-    # TODO: `update_consolidated_orders` tries to edit the host's jio message too.
-    #       Maybe consider refactoring? Else will throw error in logs
-    await update_consolidated_orders(context.bot, jio.id)
+    jio.update(chat_id=msg.chat_id, message_id=msg.message_id)
+    await jio.update_individual_order_messages(context.bot)
+    await jio.update_shared_jio_messages(context.bot)
 
     return ConversationHandler.END
 
 
 async def cancel_amend_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    jio = context.user_data["jio"]
-    del context.user_data["jio"]
+    jio: SupperJio = context.user_data.pop("jio")
 
-    # TODO: Copied from `resend_main_message`. Try and refactor
-    # Try editing the previous main message
     try:
+        # Remove the "cancel" button from the previous message
         await context.user_data["amend_msg"].edit_reply_markup(None)
-        del context.user_data["amend_msg"]
     except BadRequest as e:
         logging.error(f"Unable to edit amend message for jio {jio}: {e}")
-
-    message = format_jio_message(jio)
-    keyboard = main_message_keyboard_markup(jio, context.bot)
+    finally:
+        del context.user_data["amend_msg"]
 
     msg = await update.effective_chat.send_message(
-        text=message, reply_markup=keyboard, parse_mode=ParseMode.HTML
+        text=jio.message, reply_markup=jio.keyboard_markup, parse_mode=ParseMode.HTML
     )
-    db.update_jio_message_id(jio.id, msg.chat_id, msg.message_id)
+    jio.update(chat_id=msg.chat_id, message_id=msg.message_id)
+
     return ConversationHandler.END
