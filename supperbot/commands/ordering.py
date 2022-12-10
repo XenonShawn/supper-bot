@@ -4,24 +4,15 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    Bot,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
 )
-from telegram.constants import ParseMode
-from telegram.ext import ConversationHandler, ContextTypes
+from telegram.ext import ApplicationHandlerStop, ContextTypes, ConversationHandler
 
-from supperbot.db import db
-from supperbot.enums import CallbackType, parse_callback_data, join
-
-from supperbot.commands.helper import (
-    update_consolidated_orders,
-    format_order_message,
-    order_message_keyboard_markup,
-    update_individual_order,
-)
+from supperbot.enums import CallbackType, parse_callback_data, join, extract_jio_number
+from supperbot.models import SupperJio, User, Order, FavouriteOrder
 
 
+@User.initialize_user
 async def interested_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Called when a user clicks "Add Order" deep link on a Supper Jio.
@@ -32,24 +23,16 @@ async def interested_user(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     - Create a row in the `Order` database so they can add in their orders
     - Send a message to the user so that they can add in their orders
     """
-    # TODO: Refactor out the getting of order id.
-    jio_id = int(context.args[0][5:])
+    jio_id = extract_jio_number(context.args[0])
+    user = User.get_user(update.effective_user.id)
 
-    # Update user display name and chat id
-    db.upsert_user(
-        update.effective_user.id,
-        update.effective_user.first_name,
-        update.effective_chat.id,
-    )
+    order = Order.create_order(SupperJio.get_jio(jio_id), user)
 
-    # Create an `Order` row for the user
-    db.create_order(jio_id=jio_id, user_id=update.effective_user.id)
-
-    await format_and_send_user_orders(
-        update.effective_user.id, update.effective_chat.id, jio_id, context.bot
-    )
+    await order.send_user_order(context.bot)
+    raise ApplicationHandlerStop  # Do not trigger the other /start commands
 
 
+@User.initialize_user
 async def interested_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Same functionality as the `interested_user` coroutine, except this is for when
@@ -58,54 +41,11 @@ async def interested_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     jio_id = int(parse_callback_data(query.data)[1])
 
-    # Update user display name and chat id
-    db.upsert_user(
-        update.effective_user.id,
-        update.effective_user.first_name,
-        update.effective_chat.id,
-    )
+    user = User.get_user(update.effective_user.id)
 
-    # Create an `Order` row for the user
-    db.create_order(jio_id=jio_id, user_id=update.effective_user.id)
-
-    await format_and_send_user_orders(
-        update.effective_user.id, update.effective_chat.id, jio_id, context.bot
-    )
+    order = Order.create_order(SupperJio.get_jio(jio_id), user)
+    await order.send_user_order(context.bot)
     await query.answer()
-
-
-async def format_and_send_user_orders(
-    user_id: int,
-    chat_id: int,
-    jio_id: int,
-    bot: Bot,
-    *,
-    remove_reply_markup: bool = False,
-):
-    # TODO: check if order even exists
-    order = db.get_order(jio_id, user_id)
-
-    message = format_order_message(order)
-    keyboard = order_message_keyboard_markup(order)
-
-    if remove_reply_markup:
-        # Send a normal message to remove the Reply Keyboard,
-        # then edit in the InlineKeyboard
-        clear_msg = await bot.send_message(
-            chat_id=chat_id,
-            text="Please wait while the message loads...",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode=ParseMode.HTML,
-        )
-        await clear_msg.delete()
-
-    msg = await bot.send_message(
-        chat_id=chat_id,
-        text=message,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML,
-    )
-    db.update_order_message_id(order.jio.id, order.user_id, msg.message_id)
 
 
 async def add_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -114,7 +54,7 @@ async def add_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     query = update.callback_query
     jio_id = int(parse_callback_data(query.data)[1])
-    jio = db.get_jio(jio_id)
+    jio = SupperJio.get_jio(jio_id)
 
     if jio.is_closed():
         await query.answer("The jio is closed!")
@@ -127,10 +67,9 @@ async def add_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # Get all favourite orders
-    favourite_orders = list(
-        db.get_favourite_orders(update.effective_user.id, jio.restaurant)
-    )
-
+    favourite_orders = [
+        fav.food for fav in User.get_user(update.effective_user.id).favourite_orders
+    ]
     markup = [["↩ Cancel"]]
     for i in range(0, len(favourite_orders), 2):
         # Chunk the favourites into lines of two
@@ -138,7 +77,7 @@ async def add_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(markup, resize_keyboard=True)
 
     # Keep track of current order for the reply
-    context.user_data["current_order"] = jio_id
+    context.user_data["current_jio"] = jio
 
     await update.effective_chat.send_message(text=message, reply_markup=keyboard)
     await query.answer()
@@ -146,23 +85,20 @@ async def add_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # TODO: Investigate the error that occurs here for some reason - sometimes update.message == None
+    # TODO: Investigate the error that occurs here for some reason - sometimes
+    #       update.message == None
     food = update.message.text
 
-    jio_id = context.user_data["current_order"]
-    del context.user_data["current_order"]
+    jio: SupperJio = context.user_data.pop("current_jio")
+    user = User.get_user(update.effective_user.id)
+    order = Order.create_order(jio, user)
 
     if food != "↩ Cancel":
-        db.add_food_order(jio_id, update.effective_user.id, food)
-        await update_consolidated_orders(context.bot, jio_id)
+        order.add_food(food)
+        await jio.update_main_jio_message(context.bot)
+        await jio.update_shared_jio_messages(context.bot)
 
-    await format_and_send_user_orders(
-        update.effective_user.id,
-        update.effective_chat.id,
-        jio_id,
-        context.bot,
-        remove_reply_markup=True,
-    )
+    await order.send_user_order(context.bot, remove_reply_markup=True)
 
     return ConversationHandler.END
 
@@ -176,15 +112,14 @@ async def delete_order(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     jio_str = str(jio_id)
 
     # Check if jio is closed
-    jio = db.get_jio(jio_id)
-
+    jio = SupperJio.get_jio(jio_id)
     if jio.is_closed():
         await query.answer("The jio is closed!")
         return
 
     # Obtain all user orders and display in a column
     text = "Please select which food order to delete:"
-    order = db.get_order(jio_id, update.effective_user.id)
+    order = Order.create_order(jio, User.get_user(update.effective_user.id))
 
     keyboard = InlineKeyboardMarkup.from_column(
         [
@@ -208,38 +143,49 @@ async def delete_order(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
 
 
-async def cancel_order_action(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def cancel_order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Cancel deletion of a food order.
+    """
     query = update.callback_query
     jio_id = int(parse_callback_data(query.data)[1])
-    order = db.get_order(jio_id, update.effective_user.id)
+    jio = SupperJio.get_jio(jio_id)
 
-    await update_individual_order(context.bot, order)
+    order = Order.create_order(jio, User.get_user(update.effective_user.id))
+
+    await order.update_user_order(context.bot)
     await query.answer()
 
 
-async def delete_order_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def delete_order_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     _, jio_str, idx = parse_callback_data(query.data)
-    order = db.get_order(int(jio_str), update.effective_user.id)
 
-    # TODO: Low priority: Check if jio is closed. Typically message should be overriden
-    #       But it's possible that someone send the message elsewhere
+    jio = SupperJio.get_jio(int(jio_str))
+    order = Order.create_order(jio, User.get_user(update.effective_user.id))
 
-    db.delete_food_order(order, int(idx))
+    if jio.is_closed():
+        await query.answer("The jio is closed!")
+        return
 
-    await update_individual_order(context.bot, order)
+    order.delete_food(int(idx))
+
+    await order.update_user_order(context.bot)
+    await jio.update_main_jio_message(context.bot)
+    await jio.update_shared_jio_messages(context.bot)
+
+    # TODO: Consider putting result of deletion into query?
     await query.answer()
-    await update_consolidated_orders(context.bot, int(jio_str))
 
 
 async def add_favourite_item(update: Update, _):
     query = update.callback_query
     jio_str = parse_callback_data(query.data)[1]
     jio_id = int(jio_str)
-    jio = db.get_jio(jio_id)
-    order = db.get_order(jio_id, update.effective_user.id)
+
+    user = User.get_user(update.effective_user.id)
+    jio = SupperJio.get_jio(jio_id)
+    order = Order.create_order(jio, user)
 
     if not order.food_list:
         await update.effective_chat.send_message(
@@ -253,13 +199,17 @@ async def add_favourite_item(update: Update, _):
     text = (
         "Please select your current orders below to toggle between being in your "
         "favourites for this restaurant.\n\n"
-        "Your favourite orders are saved per restaurant, and will be shown when you "
-        "are adding an order for a jio to that restaurant.\n\n"
+        "Your favourite orders are saved on a per-restaurant basis, and will be shown"
+        "when you are adding an order for a jio to that restaurant.\n\n"
         "You can also view your favourites through /favourites.\n\n"
         "Orders which are already favourite'd are marked with a ⭐."
     )
 
-    favourites = db.get_favourite_orders(update.effective_user.id, jio.restaurant)
+    # Map the favourite food to its respective id in the database for ease of deletion
+    # later below
+    favourites = {
+        favFood.food: favFood.id for favFood in user.get_favourite_foods(jio.restaurant)
+    }
 
     markup = [
         InlineKeyboardButton(
@@ -269,16 +219,14 @@ async def add_favourite_item(update: Update, _):
     ]
 
     for idx, food in enumerate(order.food_list):
+        # If food is already a favourite food, then clicking it should unfavourite it
         if food in favourites:
             row = InlineKeyboardButton(
                 text="⭐ " + food,
                 callback_data=join(
-                    CallbackType.REMOVE_FAVOURITE_ITEM,
-                    jio_str,
-                    str(db.get_fav_id(update.effective_user.id, jio.restaurant, food)),
+                    CallbackType.REMOVE_FAVOURITE_ITEM, jio_str, str(favourites[food])
                 ),
             )
-
         else:
             row = InlineKeyboardButton(
                 text=food,
@@ -301,16 +249,17 @@ async def add_favourite_item(update: Update, _):
 async def confirm_favourite_item(update: Update, _):
     query = update.callback_query
     _, jio_str, restaurant, idx_str = parse_callback_data(query.data)
-    idx = int(idx_str)
+
+    jio = SupperJio.get_jio(int(jio_str))
+    user = User.get_user(update.effective_user.id)
+    order = Order.create_order(jio, user)
 
     # Get food name
-    jio_id = int(jio_str)
-    order = db.get_order(jio_id, update.effective_user.id)
-    food = order.food_list[idx]
+    food = order.food_list[int(idx_str)]
 
     # Update database
     # TODO: What if too many - need check
-    if not db.add_favourite_order(update.effective_user.id, restaurant, food):
+    if not FavouriteOrder.create(user, restaurant, food):
         await update.effective_chat.send_message(
             "You have too many favourite items for this restaurant. "
             "Please remove some by going to /start and viewing your favourite orders."
@@ -324,5 +273,5 @@ async def delete_favourite_item(update: Update, _):
     query = update.callback_query
     fav_id = int(parse_callback_data(query.data)[2])
 
-    db.remove_favourite_order(fav_id, update.effective_user.id)
+    FavouriteOrder.delete(fav_id, update.effective_user.id)
     await add_favourite_item(update, _)
