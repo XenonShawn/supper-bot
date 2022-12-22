@@ -159,6 +159,8 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     broadcast_info: BroadcastInformation = context.user_data[BroadcastInformation]
     jio = SupperJio.get_jio(broadcast_info.jio_id)
 
+    assert jio.owner_id == update.effective_user.id
+
     sent = []
     paid = []
     error = []
