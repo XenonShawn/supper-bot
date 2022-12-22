@@ -145,6 +145,10 @@ class SupperJio(Base):
                         callback_data=join(CallbackType.PING_ALL_UNPAID, jio_str),
                     ),
                     InlineKeyboardButton(
+                        "📢 Broadcast Message",
+                        callback_data=join(CallbackType.BROADCAST_MESSAGE, jio_str),
+                    ),
+                    InlineKeyboardButton(
                         "♻ Refresh Message",
                         callback_data=join(CallbackType.RESEND_MAIN_MESSAGE, jio_str),
                     ),

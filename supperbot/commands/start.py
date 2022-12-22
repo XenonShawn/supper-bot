@@ -1,9 +1,12 @@
 """File containing the start and help commands for the bot"""
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 
 from supperbot.enums import CallbackType
 from supperbot.models import User
+
+from config import TESTING
 
 
 async def help_command(update: Update, _) -> None:
@@ -25,6 +28,13 @@ async def start(update: Update, _) -> None:
         "Just click the buttons below to create a supper jio!"
     )
 
+    if TESTING:
+        message += (
+            "\n\n<b>NOTICE</b>\n"
+            "This bot is currently under the process of adding new features. If you "
+            "notice any bugs, please do message the creator!"
+        )
+
     reply_markup = InlineKeyboardMarkup.from_column(
         [
             InlineKeyboardButton(
@@ -43,4 +53,6 @@ async def start(update: Update, _) -> None:
         ]
     )
 
-    await update.effective_chat.send_message(text=message, reply_markup=reply_markup)
+    await update.effective_chat.send_message(
+        text=message, reply_markup=reply_markup, parse_mode=ParseMode.HTML
+    )

@@ -31,7 +31,16 @@ from supperbot.commands.ordering import (
     confirm_favourite_item,
     delete_favourite_item,
 )
-from supperbot.commands.close import close_jio, reopen_jio, create_ordering_list, back
+from supperbot.commands.close import (
+    close_jio,
+    reopen_jio,
+    create_ordering_list,
+    back,
+    broadcast,
+    confirm_broadcast,
+    send_broadcast,
+    end_broadcast,
+)
 from supperbot.commands.payment import ping_unpaid_users, declare_payment, undo_payment
 from supperbot.commands.menu import (
     view_created_jios,
@@ -166,7 +175,8 @@ application.add_handler(
         create_ordering_list, pattern=CallbackType.CREATE_ORDERING_LIST
     )
 )
-application.add_handler(CallbackQueryHandler(back, pattern=CallbackType.BACK))
+back_handler = CallbackQueryHandler(back, pattern=CallbackType.BACK)
+application.add_handler(back_handler)
 
 # Payment handlers
 application.add_handler(
@@ -180,6 +190,31 @@ application.add_handler(
 application.add_handler(
     CallbackQueryHandler(ping_unpaid_users, pattern=CallbackType.PING_ALL_UNPAID)
 )
+
+# Broadcast message handler
+broadcast_handler = CallbackQueryHandler(
+    broadcast, pattern=CallbackType.BROADCAST_MESSAGE
+)
+broadcast_conv_handler = ConversationHandler(
+    entry_points=[broadcast_handler],
+    states={
+        CallbackType.AWAIT_MESSAGE: [
+            MessageHandler(
+                (filters.TEXT | filters.PHOTO | filters.Document.IMAGE)
+                & ~filters.COMMAND,
+                confirm_broadcast,
+            ),
+        ],
+        CallbackType.CONFIRM_SEND: [
+            CallbackQueryHandler(send_broadcast, pattern=CallbackType.CONFIRM_SEND),
+        ],
+    },
+    fallbacks=[
+        broadcast_handler,
+        CallbackQueryHandler(end_broadcast, pattern=CallbackType.BROADCAST_END),
+    ],
+)
+application.add_handler(broadcast_conv_handler)
 
 # View previously created jios
 application.add_handler(
