@@ -92,7 +92,7 @@ async def shared_jio(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     Message.create(jio_id, msg_id)
 
 
-async def resend_main_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def resend_main_message(update: Update, _):
     """
     Resend the owner's jio message so that it'll be at the bottom of the chat.
     """

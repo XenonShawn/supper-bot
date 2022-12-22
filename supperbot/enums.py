@@ -63,6 +63,11 @@ class CallbackType(str, Enum):
 
     PING_ALL_UNPAID = "220"
 
+    BROADCAST_MESSAGE = "230"
+    AWAIT_MESSAGE = "231"
+    CONFIRM_SEND = "232"
+    BROADCAST_END = "233"
+
     # Closed jios for users - starts with 3
     DECLARE_PAYMENT = "300"
 
