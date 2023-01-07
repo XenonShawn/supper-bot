@@ -68,7 +68,9 @@ async def add_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Get all favourite orders
     favourite_orders = [
-        fav.food for fav in User.get_user(update.effective_user.id).favourite_orders
+        fav.food
+        for fav in User.get_user(update.effective_user.id).favourite_orders
+        if fav.restaurant == jio.restaurant
     ]
     markup = [["↩ Cancel"]]
     for i in range(0, len(favourite_orders), 2):
